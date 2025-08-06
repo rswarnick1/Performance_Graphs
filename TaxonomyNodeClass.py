@@ -36,6 +36,12 @@ class TaxonomyNode(Node):
         add_child(child_node): Adds a child node to the current node.
     """
 
+    """
+    ############## Additional Notes for Maintenance and Updating ##############
+    - Use TFP, or Pyro, for more complex distributions to allow us to convolve the distributions together 
+      and fit more than just independent normals.
+    """
+
     def __init__(self, name, distribution_D_C = None, distribution_C = None, eta = None, parent = None, children = None, direction = "greaterthan"):
         super().__init__(name, parent=parent, children=children)
         self.name = name
