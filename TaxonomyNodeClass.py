@@ -11,6 +11,10 @@ class TaxonomyNode(Node):
 
     """ A class representing a node in a taxonomy tree.
     Each node can have children, a distribution for D given C, a distribution for C, and a threshold eta.
+    The node can calculate precision and recall based on the distributions of D given C and C, and eta,
+    and a direction (greater than or less than eta). 
+    C is the indicator distribution for whether the signal is truly anomalous or not (1 for anomalies, 0 otherwise),
+    and D is the distribution of the data given C. 
     The node can also calculate precision and recall based on these distributions.
     Attributes: 
 
@@ -90,7 +94,7 @@ class TaxonomyNode(Node):
     # Method to calculate precision and recall for current node
     def prec_recall_calc(self, direction = None):
         if direction is not None:    
-            self.direction=direction
+            self.direction = direction
         if self.distribution_D_C is not None and self.distribution_C is not None:
             if self.direction == "greaterthan":
                 #probability matrix for P and C, rows correspond to P, columns to C
@@ -101,14 +105,17 @@ class TaxonomyNode(Node):
                 self.precision = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=1)[1]
             elif self.direction == "lessthan":
                 #probability matrix for P and C, rows correspond to P, columns to C
-                self.probability_matrix = np.array([[self.distribution_D_C[0].cdf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean()],
-                                    [self.distribution_D_C[0].sf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].sff(self.eta)*self.distribution_C.mean()]])
+                self.probability_matrix = np.array([[self.distribution_D_C[0].sf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].sf(self.eta)*self.distribution_C.mean()],
+                                    [self.distribution_D_C[0].cdf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean()]])
                 # Calculate precision and recall using the probability matrix
                 self.recall = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=0)[1]
                 self.precision = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=1)[1]
             else:
                 print("Invalid direction specified. Use 'greaterthan' or 'lessthan'.")
                 return
+            #####
+            # Need to implement for bidirectional outlier (greaterthan and lessthan)
+            #####
         else:
             print("Distributions not set for current Node {}.".format(self.name))
             return
