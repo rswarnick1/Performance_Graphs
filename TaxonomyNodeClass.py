@@ -71,9 +71,9 @@ class TaxonomyNode(Node):
 
             loc[0]= sum([child.distribution_D_C[0].mean() for child in self.children])
             scale[0] = np.sqrt(sum([child.distribution_D_C[0].std()**2 for child in self.children]))
-            self.distribution_D_C[0] = stats.norm(loc=loc[0]*(1-self.distribution_C.mean()), scale=scale[0])
+            self.distribution_D_C[0] = stats.norm(loc=loc[0], scale=scale[0])
 
-            loc[1]= sum([child.distribution_D_C[1].mean()*self.distribution_C.mean() for child in self.children])
+            loc[1]= sum([child.distribution_D_C[1].mean() for child in self.children])
             scale[1] = np.sqrt(sum([child.distribution_D_C[1].std()**2 for child in self.children]))
             self.distribution_D_C[1] = stats.norm(loc=loc[1], scale=scale[1])
 
@@ -88,20 +88,29 @@ class TaxonomyNode(Node):
 
     # Method to put eta in for current node as threshold for distribution_D_C[0] or distribution_D_C[1]
     # Method to calculate precision and recall for current node
-    def prec_recall_calc(self, direction = "left"):
+    def prec_recall_calc(self, direction = None):
+        if direction is not None:    
+            self.direction=direction
         if self.distribution_D_C is not None and self.distribution_C is not None:
             if self.direction == "greaterthan":
-                # Calculate precision and recall using the distributions
-                self.precision = self.distribution_D_C[1].sf(self.eta) * self.distribution_C.mean()/(self.distribution_D_C[1].sf(self.eta)*(1-self.distribution_C.mean()) + self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean())
-                self.recall = self.distribution_D_C[1].sf(self.eta)
+                #probability matrix for P and C, rows correspond to P, columns to C
+                self.probability_matrix = np.array([[self.distribution_D_C[0].cdf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean()],
+                                    [self.distribution_D_C[0].sf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].sf(self.eta)*self.distribution_C.mean()]])
+                # Calculate precision and recall using the probability matrix                
+                self.recall = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=0)[1]
+                self.precision = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=1)[1]
             elif self.direction == "lessthan":
-                self.precision = self.distribution_D_C[1].cdf(self.eta) * self.distribution_C.mean()/(self.distribution_D_C[1].cdf(self.eta)*(1-self.distribution_C.mean())+ self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean())
-                self.recall = self.distribution_D_C[1].cdf(self.eta)                   
+                #probability matrix for P and C, rows correspond to P, columns to C
+                self.probability_matrix = np.array([[self.distribution_D_C[0].cdf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean()],
+                                    [self.distribution_D_C[0].sf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].sff(self.eta)*self.distribution_C.mean()]])
+                # Calculate precision and recall using the probability matrix
+                self.recall = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=0)[1]
+                self.precision = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=1)[1]
             else:
                 print("Invalid direction specified. Use 'greaterthan' or 'lessthan'.")
                 return
         else:
-            print("Distributions not set for current TaxonomyNode.")
+            print("Distributions not set for current Node {}.".format(self.name))
             return
     def print_tree(self):
         for pre, _, node in RenderTree(self):
