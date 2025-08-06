@@ -65,13 +65,16 @@ class TaxonomyNode(Node):
         else:
             # If children exist, calculate the distribution_D_C for the current node based on the children's distributions
             self.distribution_D_C = [None, None]
+
             loc = [0]*2
             scale = [1]*2
-            loc[0]= sum([child.distribution_D_C[0].loc for child in self.children])
-            scale[0] = np.sqrt(sum([child.distribution_D_C[0].scale**2 for child in self.children]))
+
+            loc[0]= sum([child.distribution_D_C[0].mean() for child in self.children])
+            scale[0] = np.sqrt(sum([child.distribution_D_C[0].std()**2 for child in self.children]))
             self.distribution_D_C[0] = stats.norm(loc=loc[0]*(1-self.distribution_C.mean()), scale=scale[0])
-            loc[1]= sum([child.distribution_D_C[1].loc*self.distribution_C.mean() for child in self.children])
-            scale[1] = np.sqrt(sum([(child.distribution_D_C[1].scale*)**2 for child in self.children]))
+
+            loc[1]= sum([child.distribution_D_C[1].mean()*self.distribution_C.mean() for child in self.children])
+            scale[1] = np.sqrt(sum([child.distribution_D_C[1].std()**2 for child in self.children]))
             self.distribution_D_C[1] = stats.norm(loc=loc[1], scale=scale[1])
 
 
@@ -89,10 +92,10 @@ class TaxonomyNode(Node):
         if self.distribution_D_C is not None and self.distribution_C is not None:
             if self.direction == "greaterthan":
                 # Calculate precision and recall using the distributions
-                self.precision = self.distribution_D_C[1].sf(self.eta) * self.distribution_C.mean()/(self.distribution_D_C[1].sf(self.eta)*self.distribution_C.mean() + self.distribution_D_C[1].cdf(self.eta)*(1-self.distribution_C.mean()) )
+                self.precision = self.distribution_D_C[1].sf(self.eta) * self.distribution_C.mean()/(self.distribution_D_C[1].sf(self.eta)*(1-self.distribution_C.mean()) + self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean())
                 self.recall = self.distribution_D_C[1].sf(self.eta)
             elif self.direction == "lessthan":
-                self.precision = self.distribution_D_C[1].cdf(self.eta) * self.distribution_C.mean()/(self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean() + self.distribution_D_C[1].cdf(self.eta)*(1-self.distribution_C.mean()) )
+                self.precision = self.distribution_D_C[1].cdf(self.eta) * self.distribution_C.mean()/(self.distribution_D_C[1].cdf(self.eta)*(1-self.distribution_C.mean())+ self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean())
                 self.recall = self.distribution_D_C[1].cdf(self.eta)                   
             else:
                 print("Invalid direction specified. Use 'greaterthan' or 'lessthan'.")
