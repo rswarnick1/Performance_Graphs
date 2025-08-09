@@ -1,69 +1,119 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Iterable, Union
 import math
 import random
 
 try:
-    import networkx as nx
+    import networkx as nx  # optional
 except Exception:
-    nx = None  # We'll handle a minimal fallback graph below
+    nx = None
+
+import numpy as np
+import matplotlib.pyplot as plt
 
 from TaxonomyNodeClass import TaxonomyNode
 
 
 # ---- Minimal Graph fallback if networkx is unavailable ----
 class _MiniDiGraph:
-    def __init__(self):
-        self._nodes = set()
-        self._edges = set()
-        self._attrs = {}
+    def __init__(self) -> None:
+        self.nodes: List[str] = []
+        self.edges: List[Tuple[str, str]] = []
 
-    def add_node(self, n, **attrs):
-        self._nodes.add(n)
-        self._attrs.setdefault(n, {}).update(attrs)
+    def add_node(self, n: str) -> None:
+        if n not in self.nodes:
+            self.nodes.append(n)
 
-    def add_edge(self, u, v, **attrs):
-        self._edges.add((u, v))
-        # store attrs on (u,v) if needed
-        self._attrs.setdefault((u, v), {}).update(attrs)
+    def add_edge(self, u: str, v: str) -> None:
+        if u not in self.nodes:
+            self.nodes.append(u)
+        if v not in self.nodes:
+            self.nodes.append(v)
+        self.edges.append((u, v))
 
-    @property
-    def nodes(self):
-        return list(self._nodes)
-
-    @property
-    def edges(self):
-        return list(self._edges)
-
-    def successors(self, n):
-        return [v for (u, v) in self._edges if u == n]
-
-    def predecessors(self, n):
-        return [u for (u, v) in self._edges if v == n]
+GraphType = nx.DiGraph if nx is not None else _MiniDiGraph
 
 
-GraphType = _MiniDiGraph if nx is None else nx.DiGraph
-
-
+# ====== Base class for detection networks ======
 @dataclass
-class TaxonomyBayesianNetwork:
-    """
-    Very lightweight "Bayesian network"-like wrapper around a taxonomy tree.
-
-    - Builds a directed graph that follows taxonomy edges (parent -> child).
-    - Maintains a threshold per taxonomy node.
-    - Provides simple precision/recall calculators via TaxonomyNode models.
-    - Includes a coordinate-descent "equilibrium" search that minimizes the
-      sum over nodes of (Precision - Recall)^2 (cf. paper's balancing idea).
-    """
-    taxonomy_root: TaxonomyNode
-    graph: GraphType = field(default_factory=GraphType)
-    thresholds: Dict[str, float] = field(default_factory=dict)  # node name -> λ in [0,1]
+class DetectionNetworkBase:
+    thresholds: Dict[str, float] = field(default_factory=dict)
     node_lookup: Dict[str, TaxonomyNode] = field(default_factory=dict)
 
-    def __post_init__(self):
+    # Abstract in spirit: subclass must implement this
+    def _evaluate_performance(self, use_dag: bool = True, N: int = 40000) -> Dict[str, Dict[str, float]]:
+        raise NotImplementedError
+
+    def _node_loss(self, name: str, lam: float, *, use_dag: bool = True, N: int = 40000) -> float:
+        """Quadratic loss (Precision + Recall) (maximization) for node 'name' at lambda=lam, holding others fixed."""
+        orig = self.thresholds.get(name, 0.5)
+        try:
+            self.thresholds[name] = lam
+            perf = self._evaluate_performance(use_dag=use_dag, N=N)
+            stats = perf.get(name, {"precision": 0.0, "recall": 0.0})
+            p = float(stats["precision"]); r = float(stats["recall"])
+            return -(p + r) ** 2
+        finally:
+            self.thresholds[name] = orig
+
+    def _best_lambda_for_node(self, name: str, *, steps: int = 50, use_dag: bool = True, N: int = 40000) -> float:
+        best_lam, best_loss = 0.5, float("inf")
+        for i in range(steps + 1):
+            lam = i / steps
+            loss = self._node_loss(name, lam, use_dag=use_dag, N=N)
+            if loss < best_loss:
+                best_loss, best_lam = loss, lam
+        return float(best_lam)
+
+    def equilibrium_search(
+        self,
+        max_iters: int = 50,
+        tol: float = 1e-4,
+        steps: int = 100,
+        verbose: bool = False,
+        use_dag: bool = True,
+        N: int = 40000,
+    ) -> Dict[str, float]:
+        """Coordinate descent over nodes using the selected evaluator."""
+        thresholds = self.thresholds.copy()
+        for it in range(max_iters):
+            delta = 0.0
+            for name in list(self.node_lookup.keys()):
+                cur = thresholds[name]
+                # work with current thresholds
+                self.thresholds = thresholds.copy()
+                new = self._best_lambda_for_node(name, steps=steps, use_dag=use_dag, N=N)
+                thresholds[name] = new
+                delta = max(delta, abs(new - cur))
+            if verbose:
+                print(f"[iter {it}] max Δλ = {delta:.4g}")
+            if delta < tol:
+                break
+        self.thresholds.update(thresholds)
+        return thresholds
+
+
+# ====== Taxonomy + DAG network ======
+Edge2 = Tuple[str, str]
+Edge3 = Tuple[str, str, str]  # sign in {'+','-'}
+
+@dataclass
+class TaxonomyBayesianNetwork(DetectionNetworkBase):
+    """
+    A lightweight network built on a taxonomy tree, with an overlaid signed DAG:
+      - Positive edge (+): child may fire only where parent fired.
+      - Negative edge (-): child may fire only where parent did NOT fire.
+    """
+    taxonomy_root: TaxonomyNode = field(default=None)
+    graph: GraphType = field(default_factory=GraphType)
+    dag_edges: List[Edge3] = field(default_factory=list)  # (parent, child, sign)
+
+    def __post_init__(self) -> None:
+        if self.taxonomy_root is None:
+            raise ValueError("taxonomy_root must be provided")
         self._map_taxonomy_to_nodes(self.taxonomy_root)
 
     # ---- construction ----
@@ -83,78 +133,221 @@ class TaxonomyBayesianNetwork:
                 dfs(child)
         dfs(root)
 
-    # ---- metrics ----
-    def node_precision_recall(self, name: str, lam: Optional[float] = None) -> Tuple[float, float]:
-        node = self.node_lookup[name]
-        lam = self.thresholds[name] if lam is None else lam
-        prec = node.compute_precision(lam)
-        rec = node.compute_recall(lam)
-        return prec, rec
+    # ---- DAG support ----
+    def set_dag_edges(self, edges: Iterable[Union[Edge2, Edge3]]) -> None:
+        """Accepts (u,v) for positive edges or (u,v,sign) with sign in {'+','-','pos','neg','positive','negative'}."""
+        norm: List[Edge3] = []
+        for e in edges:
+            if len(e) == 2:
+                u, v = e  # type: ignore[misc]
+                s = '+'
+            else:
+                u, v, s = e  # type: ignore[misc]
+                s = {
+                    '+': '+', 'pos': '+', 'positive': '+',
+                    '-': '-', 'neg': '-', 'negative': '-'
+                }.get(str(s).lower(), '+')
+            norm.append((u, v, s))
+        self.dag_edges = norm
 
+    def _parents_map(self) -> Dict[str, Dict[str, List[str]]]:
+        pm: Dict[str, Dict[str, List[str]]] = {name: {'+': [], '-': []} for name in self.node_lookup}
+        for u, v, s in self.dag_edges:
+            if v in pm:
+                pm[v][s].append(u)
+        return pm
+
+    # ---- analytic per-node evaluation (ignores DAG) ----
     def run_performance_analysis(self, thresholds: Optional[Dict[str, float]] = None) -> Dict[str, Dict[str, float]]:
-        """
-        Returns {node_name: {"precision": p, "recall": r}}
-        """
-        if thresholds:
-            # copy into self.thresholds but don't mutate original permanently
-            tmp = self.thresholds.copy()
+        if thresholds is not None:
+            bak = self.thresholds.copy()
             try:
-                for k, v in thresholds.items():
-                    if k in tmp:
-                        tmp[k] = float(max(0.0, min(1.0, v)))
-                results = {}
-                for name in self.node_lookup:
-                    lam = tmp[name]
-                    p, r = self.node_precision_recall(name, lam)
-                    results[name] = {"precision": p, "recall": r}
-                return results
+                self.thresholds.update(thresholds)
+                results = {
+                    name: {"precision": self.node_lookup[name].compute_precision(self.thresholds[name]),
+                           "recall":    self.node_lookup[name].compute_recall(self.thresholds[name])}
+                    for name in self.node_lookup
+                }
             finally:
-                pass
+                self.thresholds = bak
+            return results
+        else:
+            return {
+                name: {"precision": self.node_lookup[name].compute_precision(self.thresholds[name]),
+                       "recall":    self.node_lookup[name].compute_recall(self.thresholds[name])}
+                for name in self.node_lookup
+            }
 
-        # use current thresholds
-        results = {}
-        for name in self.node_lookup:
-            p, r = self.node_precision_recall(name, self.thresholds[name])
-            results[name] = {"precision": p, "recall": r}
-        return results
+    # ---- DAG-aware Monte Carlo evaluation ----
+    def run_performance_analysis_dag(
+        self,
+        thresholds: Optional[Dict[str, float]] = None,
+        N: int = 40000,
+        seed: int = 1337,
+    ) -> Dict[str, Dict[str, float]]:
+        rng = np.random.default_rng(seed)
+        if thresholds is not None:
+            bak = self.thresholds.copy()
+            self.thresholds.update(thresholds)
 
-    # ---- equilibrium search ----
-    def _node_loss(self, name: str, lam: float) -> float:
-        p, r = self.node_precision_recall(name, lam)
-        return (p - r) ** 2
+        try:
+            names = list(self.node_lookup.keys())
+            parents = self._parents_map()
 
-    def _best_lambda_for_node(self, name: str, *, steps: int = 50) -> float:
-        """
-        Brute-force line search over [0,1] to minimize (precision - recall)^2 for this node,
-        holding all other nodes fixed (they don't interact in our toy model).
-        """
-        best_lam, best_loss = None, float("inf")
-        for i in range(steps + 1):
-            lam = i / steps
-            loss = self._node_loss(name, lam)
-            if loss < best_loss:
-                best_loss, best_lam = loss, lam
-        return float(best_lam)
+            # independent base prevalences (demo)
+            prevalence = {n: 0.25 for n in names}
+            C = {n: (rng.random(N) < prevalence[n]) for n in names}
 
-    def equilibrium_search(self, max_iters: int = 50, tol: float = 1e-4, steps: int = 100, verbose: bool = False) -> Dict[str, float]:
-        """
-        Simple coordinate descent: repeatedly optimize each node's λ to equalize precision/recall.
-        """
-        thresholds = self.thresholds.copy()
-        for it in range(max_iters):
-            delta = 0.0
-            for name in self.node_lookup:
-                cur = thresholds[name]
-                new = self._best_lambda_for_node(name, steps=steps)
-                thresholds[name] = new
-                delta = max(delta, abs(new - cur))
-            if verbose:
-                print(f"[iter {it}] max Δλ = {delta:.4g}")
-            if delta < tol:
-                break
-        # commit
-        self.thresholds.update(thresholds)
-        return thresholds
+            # topological order from dag_edges
+            indeg = {n: 0 for n in names}
+            children = {n: [] for n in names}
+            for u, v, _s in self.dag_edges:
+                if v in indeg:
+                    indeg[v] += 1
+                if u in children:
+                    children[u].append(v)
+            from collections import deque
+            q = deque([n for n in names if indeg[n] == 0])
+            topo: List[str] = []
+            while q:
+                x = q.popleft()
+                topo.append(x)
+                for y in children.get(x, []):
+                    indeg[y] -= 1
+                    if indeg[y] == 0:
+                        q.append(y)
+            if len(topo) < len(names):
+                topo = names  # disconnected or empty DAG -> arbitrary order
+
+            # simulate conditioned detections
+            D: Dict[str, np.ndarray] = {}
+            parmap = parents
+            for n in topo:
+                node = self.node_lookup[n]
+                lam = float(self.thresholds.get(n, 0.5))
+                P = node.compute_precision(lam)
+                R = node.compute_recall(lam)
+
+                Dn = np.zeros(N, dtype=bool)
+                pos_mask = C[n]
+                Dn[pos_mask] = rng.random(pos_mask.sum()) < R
+                neg_mask = ~pos_mask
+                Dn[neg_mask] |= rng.random(neg_mask.sum()) < (1 - P)
+
+                par = parmap.get(n, {'+': [], '-': []})
+                pos_par, neg_par = par.get('+', []), par.get('-', [])
+                if pos_par or neg_par:
+                    mask = np.ones(N, dtype=bool)
+                    for p in pos_par:
+                        mask &= D[p]
+                    for p in neg_par:
+                        mask &= ~D[p]
+                    Dn = Dn & mask
+
+                D[n] = Dn
+
+            # aggregate stats
+            results: Dict[str, Dict[str, float]] = {}
+            for n in names:
+                TP = np.logical_and(D[n], C[n]).sum()
+                FP = np.logical_and(D[n], ~C[n]).sum()
+                FN = np.logical_and(~D[n], C[n]).sum()
+                precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+                recall    = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+                results[n] = {"precision": float(precision), "recall": float(recall)}
+            return results
+        finally:
+            if thresholds is not None:
+                self.thresholds = bak
+
+    # unified for optimizer
+    def _evaluate_performance(self, use_dag: bool = True, N: int = 40000) -> Dict[str, Dict[str, float]]:
+        if use_dag and self.dag_edges:
+            return self.run_performance_analysis_dag(N=N)
+        return self.run_performance_analysis()
+
+    # ---- Visualization: signed-edge DAG ----
+    def render_detection_dag(
+        self,
+        edges: Optional[Iterable[Union[Edge2, Edge3]]] = None,
+        save_path: Optional[str] = None,
+        title: str = "Detection DAG (signed)",
+    ) -> None:
+        """Positive edges solid; negative edges dashed. Simple layered layout by path depth."""
+        # normalize edges
+        if edges is None:
+            edges_in: List[Union[Edge2, Edge3]] = self.dag_edges if self.dag_edges else list(self.taxonomy_root.edges())
+        else:
+            edges_in = list(edges)
+
+        edges3: List[Edge3] = []
+        for e in edges_in:
+            if len(e) == 2:
+                u, v = e  # type: ignore[misc]
+                s = '+'
+            else:
+                u, v, s = e  # type: ignore[misc]
+                s = {
+                    '+': '+', 'pos': '+', 'positive': '+',
+                    '-': '-', 'neg': '-', 'negative': '-'
+                }.get(str(s).lower(), '+')
+            edges3.append((u, v, s))
+
+        nodes: List[str] = sorted(list({u for u, _, _ in edges3} | {v for _, v, _ in edges3}))
+
+        # positions by taxonomy depth
+        def depth(name: str) -> int:
+            return max(0, name.count("/"))
+        by_layer: Dict[int, List[str]] = {}
+        for n in nodes:
+            d = depth(n)
+            by_layer.setdefault(d, []).append(n)
+        max_layer = max(by_layer) if by_layer else 0
+        pos: Dict[str, Tuple[float, float]] = {}
+        for d in range(max_layer + 1):
+            row = sorted(by_layer.get(d, []))
+            k = len(row) or 1
+            for i, n in enumerate(row):
+                x = (i + 1) / (k + 1)
+                y = 1.0 - (0.9 * d / (max_layer + 1 if max_layer + 1 else 1))
+                pos[n] = (x, y)
+
+        plt.figure(figsize=(10, 6))
+        has_pos = has_neg = False
+        for u, v, s in edges3:
+            x1, y1 = pos[u]; x2, y2 = pos[v]
+            if s == '+':
+                has_pos = True
+                plt.annotate("", xy=(x2, y2), xytext=(x1, y1),
+                             arrowprops=dict(arrowstyle="->", lw=1.4))
+            else:
+                has_neg = True
+                plt.annotate("", xy=(x2, y2), xytext=(x1, y1),
+                             arrowprops=dict(arrowstyle="->", lw=1.4, linestyle="dashed"))
+
+        for n in nodes:
+            x, y = pos[n]
+            plt.scatter([x], [y], s=600, edgecolors="#335", linewidths=1.0, c=["#DDEEFF"], zorder=3)
+            plt.text(x, y, n, ha="center", va="center", fontsize=9)
+
+        if has_pos or has_neg:
+            from matplotlib.lines import Line2D
+            handles = []
+            if has_pos:
+                handles.append(Line2D([0],[0], linestyle="-", marker="", label="positive"))
+            if has_neg:
+                handles.append(Line2D([0],[0], linestyle="--", marker="", label="negative"))
+            plt.legend(handles=handles, loc="best")
+
+        plt.axis("off")
+        if title:
+            plt.title(title)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+            plt.close()
+        else:
+            plt.show()
 
 
 # ---- Convenient taxonomy construction for __main__ ----
@@ -165,205 +358,106 @@ def _make_demo_taxonomy() -> TaxonomyNode:
     c = TaxonomyNode("C", detection_params={"sensitivity": 0.55, "specificity": 0.65, "scale": 9.0})
     d = TaxonomyNode("D", detection_params={"sensitivity": 0.7, "specificity": 0.7, "scale": 10.0})
     e = TaxonomyNode("E", detection_params={"sensitivity": 0.5, "specificity": 0.8, "scale": 9.0})
-    f = TaxonomyNode("F", detection_params={"sensitivity": .35, "specificity": 0.3, "scale": 2.0})
+    f = TaxonomyNode("F", detection_params={"sensitivity": 0.35, "specificity": 0.30, "scale": 2.0})
     g = TaxonomyNode("G", detection_params={"sensitivity": 0.275, "specificity": 0.35, "scale": 3.0})
     h = TaxonomyNode("H", detection_params={"sensitivity": 0.325, "specificity": 0.275, "scale": 4.0})
     i = TaxonomyNode("I", detection_params={"sensitivity": 0.35, "specificity": 0.35, "scale": 5.0})
-    j = TaxonomyNode("J", detection_params={"sensitivity": 0.4, "specificity": 0.175, "scale": 6.0})
-    k = TaxonomyNode("K", detection_params={"sensitivity": 0.89, "specificity": 0.11, "scale": 5.0})
+    j = TaxonomyNode("J", detection_params={"sensitivity": 0.40, "specificity": 0.175, "scale": 6.0})
 
     root.add_child(a)
     root.add_child(b)
     a.add_child(c)
     a.add_child(f)
     b.add_child(d)
-    b.add_child(e)
-    c.add_child(k)
+    c.add_child(e)
     c.add_child(g)
     root.add_child(h)
-    h.add_child(i)
+    root.add_child(i)
     h.add_child(j)
-
+    i.add_child(j)
 
     return root
 
 
+def _make_demo_dag_edges(root: TaxonomyNode) -> List[Edge3]:
+    """Return signed DAG edges using the paper example plus one illustrative negative edge if nodes exist."""
+    # Build short->full mapping
+    name_to_full: Dict[str, str] = {}
+    def walk(n: TaxonomyNode) -> None:
+        full = "/".join(n.path())
+        name_to_full[n.name] = full
+        for c in n.children:
+            walk(c)
+    walk(root)
+
+    pos_edges: List[Tuple[str, str]] = [("A","C"), ("A","E"), ("C","E"), ("B","D"), ("D","E")]
+    edges_full: List[Edge3] = []
+    for u, v in pos_edges:
+        if u in name_to_full and v in name_to_full:
+            edges_full.append((name_to_full[u], name_to_full[v], '+'))
+    # Add one negative edge if both exist
+    if "H" in name_to_full and "E" in name_to_full:
+        edges_full.append((name_to_full["H"], name_to_full["E"], '-'))
+    return edges_full
+
+
 def _pretty_print_perf(perf: Dict[str, Dict[str, float]]) -> None:
     names = sorted(perf.keys())
-    width = max(len(n) for n in names)
+    width = max(len(n) for n in names) if names else 4
     print("Node".ljust(width), " | Precision  | Recall")
     print("-" * (width + 26))
     for n in names:
-        p = perf[n]["precision"]
-        r = perf[n]["recall"]
+        p = perf[n]["precision"]; r = perf[n]["recall"]
         print(n.ljust(width), f"| {p:9.3f} | {r:6.3f}")
 
 
 if __name__ == "__main__":
-    # Build a small demo taxonomy and run the analysis
+    # Build demo taxonomy and DAG
     root = _make_demo_taxonomy()
-    tbn = TaxonomyBayesianNetwork(root)
+    tbn = TaxonomyBayesianNetwork(taxonomy_root=root)
+    dag_edges = _make_demo_dag_edges(root)
+    tbn.set_dag_edges(dag_edges)
 
-    print("Running performance analysis (initial thresholds):")
-    perf = tbn.run_performance_analysis()
-    _pretty_print_perf(perf)
+    print("DAG edges (full names):")
+    for u, v, s in dag_edges:
+        arrow = "->" if s == "+" else "-|>"
+        print(f"  {u} {arrow} {v}  (sign={s})")
 
-    print("\nSearching for equilibrium thresholds (coordinate descent)...")
-    res_thresholds = tbn.equilibrium_search(verbose=True)
-    print("\nResulting thresholds:")
+    # Initial performance (DAG-aware)
+    print("\nInitial DAG-aware performance (using default thresholds):")
+    perf0 = tbn.run_performance_analysis_dag(N=30000)
+    _pretty_print_perf(perf0)
+
+    # Per-node best λ via DAG-aware loss
+    print("\nComputing per-node best λ (DAG-aware)...")
+    best_thresholds: Dict[str, float] = {}
+    for name in tbn.node_lookup:
+        lam = tbn._best_lambda_for_node(name, steps=80, use_dag=True, N=30000)
+        best_thresholds[name] = lam
+
+    print("\nPer-node best λ:")
+    for k in sorted(best_thresholds):
+        print(f"  {k}: λ = {best_thresholds[k]:.3f}")
+
+    print("\nPerformance at per-node best λ (DAG-aware):")
+    perf_best = tbn.run_performance_analysis_dag(best_thresholds, N=40000)
+    _pretty_print_perf(perf_best)
+
+    # Nash-equilibrium-style search (coordinate descent) with DAG-aware loss
+    print("\nSearching for equilibrium thresholds (coordinate descent, DAG-aware)...")
+    tbn.thresholds.update(best_thresholds)  # start from per-node bests
+    res_thresholds = tbn.equilibrium_search(verbose=True, steps=80, use_dag=True, N=30000)
+    print("\nResulting thresholds (equilibrium):")
     for k in sorted(res_thresholds):
         print(f"  {k}: λ = {res_thresholds[k]:.3f}")
 
-    print("\nPerformance at equilibrium:")
-    perf2 = tbn.run_performance_analysis(res_thresholds)
-    _pretty_print_perf(perf2)
+    print("\nPerformance at equilibrium (DAG-aware):")
+    perf_eq = tbn.run_performance_analysis_dag(res_thresholds, N=40000)
+    _pretty_print_perf(perf_eq)
 
-
-# ===== Rendering utilities (dependency-light) =====
-from typing import Iterable, Optional
-
-try:
-    import matplotlib.pyplot as plt
-except Exception as _e:
-    plt = None  # Headless environments may lack display; saving to file still works if backends are present.
-
-def _hierarchy_pos(edges: Iterable[tuple]) -> dict:
-    """Simple layered layout for a tree/DAG without networkx layouts."""
-    children = {}
-    indeg = {}
-    nodes = set()
-    for u, v in edges:
-        nodes.add(u); nodes.add(v)
-        children.setdefault(u, []).append(v)
-        indeg[v] = indeg.get(v, 0) + 1
-        indeg.setdefault(u, indeg.get(u, 0))
-
-    roots = [n for n in nodes if indeg.get(n, 0) == 0] or (sorted(nodes)[:1] if nodes else [])
-    from collections import deque, defaultdict
-    depth = {}
-    q = deque()
-    for r in roots:
-        depth[r] = 0
-        q.append(r)
-    while q:
-        x = q.popleft()
-        for y in children.get(x, []):
-            if y not in depth:
-                depth[y] = depth[x] + 1
-                q.append(y)
-    by_layer = {}
-    for n in nodes:
-        by_layer.setdefault(depth.get(n, 0), []).append(n)
-    pos = {}
-    max_layer = max(by_layer) if by_layer else 0
-    for d in range(0, max_layer + 1):
-        row = sorted(by_layer.get(d, []))
-        k = len(row) or 1
-        for i, n in enumerate(row):
-            x = (i + 1) / (k + 1)
-            y = 1.0 - (0.9 * d / (max_layer + 1 if max_layer + 1 else 1))
-            pos[n] = (x, y)
-    return pos
-
-def _maybe_graphviz_layout(G):
-    if nx is None:
-        return None
+    # Save a signed-edge DAG visualization
     try:
-        from networkx.drawing.nx_agraph import graphviz_layout
-        return graphviz_layout(G, prog="dot")
-    except Exception:
-        try:
-            from networkx.drawing.nx_pydot import graphviz_layout
-            return graphviz_layout(G, prog="dot")
-        except Exception:
-            return None
-
-def _draw_graph(edges, node_labels=None, node_colors=None, figsize=(11, 7), title=None, save_path=None):
-    edges = list(edges)
-    nodes = set([u for u, _ in edges] + [v for _, v in edges])
-
-    # Build positions
-    if nx is not None:
-        G = nx.DiGraph()
-        G.add_nodes_from(nodes)
-        G.add_edges_from(edges)
-        pos = _maybe_graphviz_layout(G) or _hierarchy_pos(edges)
-    else:
-        pos = _hierarchy_pos(edges)
-
-    if plt is None:
-        raise RuntimeError("matplotlib is required to render graphs")
-
-    import matplotlib.pyplot as _plt  # ensure backend is initialized
-    _plt.figure(figsize=figsize)
-    for (u, v) in edges:
-        x1, y1 = pos[u]; x2, y2 = pos[v]
-        _plt.annotate("", xy=(x2, y2), xytext=(x1, y1), arrowprops=dict(arrowstyle="->", lw=1.2))
-    for n in nodes:
-        x, y = pos[n]
-        color = (node_colors or {}).get(n, "#DDEEFF")
-        _plt.scatter([x], [y], s=600, edgecolors="#335", linewidths=1.0, c=[color], zorder=3)
-        label = (node_labels or {}).get(n, n)
-        _plt.text(x, y, label, ha="center", va="center", fontsize=10, zorder=4)
-    _plt.axis("off")
-    if title:
-        _plt.title(title)
-    _plt.tight_layout()
-    if save_path:
-        _plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        _plt.close()
-    else:
-        _plt.show()
-
-# ----- Instance methods (bound after definition) -----
-def _tbn_render_taxonomy_tree(self, save_path: Optional[str] = None, annotate_thresholds: bool = True, figsize=(11,7)):
-    root = getattr(self, "taxonomy_root", None)
-    if root is None:
-        raise ValueError("taxonomy_root is not set on this instance.")
-    # Collect edges and nodes
-    try:
-        edges = list(root.edges())
-        names = [n.name for n in root.walk()]
-    except Exception:
-        # Fallback: rebuild from node_lookup paths
-        names = list(self.node_lookup.keys())
-        edges = []
-        for name in names:
-            parts = name.split("/")
-            if len(parts) > 1:
-                parent = "/".join(parts[:-1])
-                edges.append((parent, name))
-    node_labels = {}
-    thresholds = getattr(self, "thresholds", None) if annotate_thresholds else None
-    for name in names:
-        if thresholds and name in thresholds:
-            node_labels[name] = f"{name}\nλ={thresholds[name]:.2f}"
-        else:
-            node_labels[name] = name
-    _draw_graph(edges=edges, node_labels=node_labels, figsize=figsize, title="Taxonomy Tree", save_path=save_path)
-
-def _tbn_render_detection_dag(self, edges=None, save_path: Optional[str] = None, figsize=(11,7), title: str = "Detection Dependency DAG"):
-    if edges is None:
-        # default to taxonomy edges
-        try:
-            edges = list(self.taxonomy_root.edges())
-        except Exception:
-            # rebuild from node_lookup path relations
-            edges = []
-            for name in self.node_lookup.keys():
-                parts = name.split("/")
-                if len(parts) > 1:
-                    parent = "/".join(parts[:-1])
-                    edges.append((parent, name))
-    node_colors = {}
-    names_in_model = set(getattr(self, "node_lookup", {}).keys() or [])
-    for (u, v) in edges:
-        if u in names_in_model:
-            node_colors[u] = "#EAF7E6"
-        if v in names_in_model:
-            node_colors[v] = "#EAF7E6"
-    _draw_graph(edges=edges, node_labels=None, node_colors=node_colors, figsize=figsize, title=title, save_path=save_path)
-
-# bind
-TaxonomyBayesianNetwork.render_taxonomy_tree = _tbn_render_taxonomy_tree
-TaxonomyBayesianNetwork.render_detection_dag = _tbn_render_detection_dag
+        tbn.render_detection_dag(edges=dag_edges, save_path="dag_signed.png", title="Detection DAG (signed edges)")
+        print('\nSaved DAG figure with signed edges to dag_signed.png')
+    except Exception as e:
+        print("Failed to render DAG figure:", e)
