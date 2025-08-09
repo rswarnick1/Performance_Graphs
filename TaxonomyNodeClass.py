@@ -1,148 +1,60 @@
-import numpy as np
-import scipy.stats as stats
-import scipy as sp
-import matplotlib.pyplot as plt
 
-# https:// anytree.readthedocs.io/en/latest/api.html
-from anytree import Node, RenderTree
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+import math
 
-class TaxonomyNode(Node):
-
-    """ A class representing a node in a taxonomy tree.
-    Each node can have children, a distribution for D given C, a distribution for C, and a threshold eta.
-    The node can calculate precision and recall based on the distributions of D given C and C, and eta,
-    and a direction (greater than or less than eta). 
-    C is the indicator distribution for whether the signal is truly anomalous or not (1 for anomalies, 0 otherwise),
-    and D is the distribution of the data given C. 
-    The node can also calculate precision and recall based on these distributions.
-    Attributes: 
-
-        name (str): The name of the node.
-        distribution_D_C (list): A list of two distributions, one for each class (0 and 1).
-        distribution_C (scipy.stats.rv_continuous): A Bernoulli distribution with some given probability.
-        eta (float): The threshold for the distribution_D_C[0] or distribution_D_C[1].
-        parent (TaxonomyNode): The parent node in the taxonomy tree.
-        children (list): A list of child nodes in the taxonomy tree.
-        direction (str): The direction of the outlier ('greaterthan' or 'lessthan').
-        precision (float): The precision calculated for the node.
-        recall (float): The recall calculated for the node.
-    Methods:
-        set_distribution_D_C(distribution_D_C): Sets the distribution_D_C for the node.
-        set_distribution_C(distribution_C): Sets the distribution_C for the node.
-        prec_recall_calc(direction): Calculates precision and recall based on the distributions and eta.
-        print_tree(): Prints the tree structure starting
-        from the current node.
-        add_child(child_node): Adds a child node to the current node.
+@dataclass
+class TaxonomyNode:
     """
+    Lightweight taxonomy node with simple precision/recall models.
 
+    We avoid external dependencies (e.g., anytree) to keep runtime friction low.
     """
-    ############## Additional Notes for Maintenance and Updating ##############
-    - Use TFP, or Pyro, for more complex distributions to allow us to convolve the distributions together 
-      and fit more than just independent normals.
-    """
+    name: str
+    parent: Optional["TaxonomyNode"] = None
+    children: List["TaxonomyNode"] = field(default_factory=list)
+    detection_params: Dict[str, float] = field(default_factory=lambda: {
+        # sensitivity ~= recall at low threshold; specificity influences precision at high threshold
+        "sensitivity": 0.6,
+        "specificity": 0.6,
+        "scale": 8.0,  # steepness of logistic curves
+    })
 
-    def __init__(self, name, distribution_D_C = None, distribution_C = None, eta = None, parent = None, children = None, direction = "greaterthan"):
-        super().__init__(name, parent=parent, children=children)
-        self.name = name
-        # list of the children taxonomynode objects
-        self.children = []
-        # distribution_D_C is a list of two distributions, one for each class (0 and 1). These must have the same support.
-        # distribution_C is a bernoulli with some given probability (dictating which of the elements of the distribution_D_C list it appropriate)
-        self.distribution_D_C = distribution_D_C
-        self.distribution_C = distribution_C
-        # If precision and recall are calculated, they will be stored in these attributes
-        self.precision = None
-        self.recall = None
-        # eta is the threshold for the distribution_D_C[0] or distribution_D_C[1]
-        if children is None:
-            self.children = []
-        else:
-            self.children = children
-        # eta is the threshold for the distribution_D_C[0] or distribution_D_C[1]
-        self.eta = eta
-        # direction is the direction of the outlier (scoring less than or greater than the specified threshold, for P(D=P) in precision and recall)
-        self.direction = direction
-        #self.height = height
+    def add_child(self, child: "TaxonomyNode") -> None:
+        child.parent = self
+        self.children.append(child)
 
-    def set_distribution_D_C(self, distribution_D_C = None):
-        if not self.children:
-            # If no children exist, set the distribution_D_C directly
-            if distribution_D_C is None:
-                raise ValueError("distribution_D_C must be provided for leaf nodes.")
-            self.distribution_D_C[0] = distribution_D_C[0]
-            self.distribution_D_C[1] = distribution_D_C[1]
-        else:
-            # If children exist, calculate the distribution_D_C for the current node based on the children's distributions
-            self.distribution_D_C = [None, None]
+    # ---- Simple analytic models ----
+    def compute_recall(self, lam: float) -> float:
+        """
+        Recall(λ): decreasing logistic with λ — stricter thresholds catch fewer positives.
+        """
+        sens = float(self.detection_params.get("sensitivity", 0.5))
+        scale = float(self.detection_params.get("scale", 8.0))
+        return 1.0 / (1.0 + math.exp(scale * (lam - sens)))
 
-            loc = [0]*2
-            scale = [1]*2
+    def compute_precision(self, lam: float) -> float:
+        """
+        Precision(λ): increasing logistic with λ — stricter thresholds reduce false positives.
+        """
+        spec = float(self.detection_params.get("specificity", 0.5))
+        scale = float(self.detection_params.get("scale", 8.0))
+        # center around (1 - specificity) so higher specificity shifts curve left (higher precision sooner)
+        return 1.0 / (1.0 + math.exp(-scale * (lam - (1.0 - spec))))
 
-            loc[0]= sum([child.distribution_D_C[0].mean() for child in self.children])
-            scale[0] = np.sqrt(sum([child.distribution_D_C[0].std()**2 for child in self.children]))
-            self.distribution_D_C[0] = stats.norm(loc=loc[0], scale=scale[0])
+    # ---- helpers ----
+    def is_leaf(self) -> bool:
+        return len(self.children) == 0
 
-            loc[1]= sum([child.distribution_D_C[1].mean() for child in self.children])
-            scale[1] = np.sqrt(sum([child.distribution_D_C[1].std()**2 for child in self.children]))
-            self.distribution_D_C[1] = stats.norm(loc=loc[1], scale=scale[1])
+    def path(self) -> List[str]:
+        out = []
+        cur = self
+        while cur is not None:
+            out.append(cur.name)
+            cur = cur.parent
+        return list(reversed(out))
 
-
-    # Method to set distribution of indicator C for current node if node is a leaf node
-    def set_distribution_C(self, distribution_C = None):
-        if not self.children:
-            self.distribution_C = distribution_C
-        else:
-            self.distribution_C = stats.bernoulli(1-np.prod(np.array([1-child.distribution_C.mean() for child in self.children])))
-            
-
-    # Method to put eta in for current node as threshold for distribution_D_C[0] or distribution_D_C[1]
-    # Method to calculate precision and recall for current node
-    def prec_recall_calc(self, direction = None):
-        if direction is not None:    
-            self.direction = direction
-        if self.distribution_D_C is not None and self.distribution_C is not None:
-            if self.direction == "greaterthan":
-                #probability matrix for P and C, rows correspond to P, columns to C
-                self.probability_matrix = np.array([[self.distribution_D_C[0].cdf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean()],
-                                    [self.distribution_D_C[0].sf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].sf(self.eta)*self.distribution_C.mean()]])
-                # Calculate precision and recall using the probability matrix                
-                self.recall = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=0)[1]
-                self.precision = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=1)[1]
-            elif self.direction == "lessthan":
-                #probability matrix for P and C, rows correspond to P, columns to C
-                self.probability_matrix = np.array([[self.distribution_D_C[0].sf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].sf(self.eta)*self.distribution_C.mean()],
-                                    [self.distribution_D_C[0].cdf(self.eta)*(1-self.distribution_C.mean()), self.distribution_D_C[1].cdf(self.eta)*self.distribution_C.mean()]])
-                # Calculate precision and recall using the probability matrix
-                self.recall = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=0)[1]
-                self.precision = self.probability_matrix[1,1]/np.sum(self.probability_matrix,axis=1)[1]
-            else:
-                print("Invalid direction specified. Use 'greaterthan' or 'lessthan'.")
-                return
-            #####
-            # Need to implement for bidirectional outlier (greaterthan and lessthan)
-            #####
-        else:
-            print("Distributions not set for current Node {}.".format(self.name))
-            return
-    def print_tree(self):
-        for pre, _, node in RenderTree(self):
-            print(f"{pre}{node.name}(precision:{node.precision},recall:{node.recall},eta:{node.eta},distribution_C:{node.distribution_C}, distribution_D_C: {node.distribution_D_C})")
-
-    # Method to add a child node to current iteration of node class
-    def add_child(self, child_node):
-        self.children.append(child_node)
-        child_node.parent = self
-
-    def __repr__(self):
-        return f"TaxonomyNode({self.name})"
-
-
-if __name__ == "__main__":
-    # Example usage
-    root = TaxonomyNode("Root")
-    child1 = TaxonomyNode("Child1", parent=root)
-    child2 = TaxonomyNode("Child2", parent=root)
-    root.add_child(child1)
-    root.add_child(child2)
-    print(RenderTree(root))
+    def __repr__(self) -> str:
+        return f"TaxonomyNode(name={self.name!r}, children={[c.name for c in self.children]!r})"
