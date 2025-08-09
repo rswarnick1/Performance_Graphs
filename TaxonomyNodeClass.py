@@ -58,3 +58,29 @@ class TaxonomyNode:
 
     def __repr__(self) -> str:
         return f"TaxonomyNode(name={self.name!r}, children={[c.name for c in self.children]!r})"
+
+
+# --- Rendering traversal helpers ---
+def _tn_walk(self):
+    """Yield nodes in a DFS (pre-order)."""
+    yield self
+    for c in getattr(self, "children", []):
+        for x in _tn_walk(c):
+            yield x
+
+def _tn_edges(self):
+    """Yield (parent_name, child_name) pairs for the taxonomy tree."""
+    for c in getattr(self, "children", []):
+        yield (self.name, c.name)
+        for e in _tn_edges(c):
+            yield e
+
+# attach to class at import time
+try:
+    TaxonomyNode.walk
+except Exception:
+    TaxonomyNode.walk = _tn_walk
+try:
+    TaxonomyNode.edges
+except Exception:
+    TaxonomyNode.edges = _tn_edges

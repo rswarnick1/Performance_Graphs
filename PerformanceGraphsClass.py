@@ -165,12 +165,26 @@ def _make_demo_taxonomy() -> TaxonomyNode:
     c = TaxonomyNode("C", detection_params={"sensitivity": 0.55, "specificity": 0.65, "scale": 9.0})
     d = TaxonomyNode("D", detection_params={"sensitivity": 0.7, "specificity": 0.7, "scale": 10.0})
     e = TaxonomyNode("E", detection_params={"sensitivity": 0.5, "specificity": 0.8, "scale": 9.0})
+    f = TaxonomyNode("F", detection_params={"sensitivity": .35, "specificity": 0.3, "scale": 2.0})
+    g = TaxonomyNode("G", detection_params={"sensitivity": 0.275, "specificity": 0.35, "scale": 3.0})
+    h = TaxonomyNode("H", detection_params={"sensitivity": 0.325, "specificity": 0.275, "scale": 4.0})
+    i = TaxonomyNode("I", detection_params={"sensitivity": 0.35, "specificity": 0.35, "scale": 5.0})
+    j = TaxonomyNode("J", detection_params={"sensitivity": 0.4, "specificity": 0.175, "scale": 6.0})
+    k = TaxonomyNode("K", detection_params={"sensitivity": 0.89, "specificity": 0.11, "scale": 5.0})
 
     root.add_child(a)
     root.add_child(b)
     a.add_child(c)
+    a.add_child(f)
     b.add_child(d)
-    c.add_child(e)
+    b.add_child(e)
+    c.add_child(k)
+    c.add_child(g)
+    root.add_child(h)
+    h.add_child(i)
+    h.add_child(j)
+
+
     return root
 
 
@@ -203,3 +217,153 @@ if __name__ == "__main__":
     print("\nPerformance at equilibrium:")
     perf2 = tbn.run_performance_analysis(res_thresholds)
     _pretty_print_perf(perf2)
+
+
+# ===== Rendering utilities (dependency-light) =====
+from typing import Iterable, Optional
+
+try:
+    import matplotlib.pyplot as plt
+except Exception as _e:
+    plt = None  # Headless environments may lack display; saving to file still works if backends are present.
+
+def _hierarchy_pos(edges: Iterable[tuple]) -> dict:
+    """Simple layered layout for a tree/DAG without networkx layouts."""
+    children = {}
+    indeg = {}
+    nodes = set()
+    for u, v in edges:
+        nodes.add(u); nodes.add(v)
+        children.setdefault(u, []).append(v)
+        indeg[v] = indeg.get(v, 0) + 1
+        indeg.setdefault(u, indeg.get(u, 0))
+
+    roots = [n for n in nodes if indeg.get(n, 0) == 0] or (sorted(nodes)[:1] if nodes else [])
+    from collections import deque, defaultdict
+    depth = {}
+    q = deque()
+    for r in roots:
+        depth[r] = 0
+        q.append(r)
+    while q:
+        x = q.popleft()
+        for y in children.get(x, []):
+            if y not in depth:
+                depth[y] = depth[x] + 1
+                q.append(y)
+    by_layer = {}
+    for n in nodes:
+        by_layer.setdefault(depth.get(n, 0), []).append(n)
+    pos = {}
+    max_layer = max(by_layer) if by_layer else 0
+    for d in range(0, max_layer + 1):
+        row = sorted(by_layer.get(d, []))
+        k = len(row) or 1
+        for i, n in enumerate(row):
+            x = (i + 1) / (k + 1)
+            y = 1.0 - (0.9 * d / (max_layer + 1 if max_layer + 1 else 1))
+            pos[n] = (x, y)
+    return pos
+
+def _maybe_graphviz_layout(G):
+    if nx is None:
+        return None
+    try:
+        from networkx.drawing.nx_agraph import graphviz_layout
+        return graphviz_layout(G, prog="dot")
+    except Exception:
+        try:
+            from networkx.drawing.nx_pydot import graphviz_layout
+            return graphviz_layout(G, prog="dot")
+        except Exception:
+            return None
+
+def _draw_graph(edges, node_labels=None, node_colors=None, figsize=(11, 7), title=None, save_path=None):
+    edges = list(edges)
+    nodes = set([u for u, _ in edges] + [v for _, v in edges])
+
+    # Build positions
+    if nx is not None:
+        G = nx.DiGraph()
+        G.add_nodes_from(nodes)
+        G.add_edges_from(edges)
+        pos = _maybe_graphviz_layout(G) or _hierarchy_pos(edges)
+    else:
+        pos = _hierarchy_pos(edges)
+
+    if plt is None:
+        raise RuntimeError("matplotlib is required to render graphs")
+
+    import matplotlib.pyplot as _plt  # ensure backend is initialized
+    _plt.figure(figsize=figsize)
+    for (u, v) in edges:
+        x1, y1 = pos[u]; x2, y2 = pos[v]
+        _plt.annotate("", xy=(x2, y2), xytext=(x1, y1), arrowprops=dict(arrowstyle="->", lw=1.2))
+    for n in nodes:
+        x, y = pos[n]
+        color = (node_colors or {}).get(n, "#DDEEFF")
+        _plt.scatter([x], [y], s=600, edgecolors="#335", linewidths=1.0, c=[color], zorder=3)
+        label = (node_labels or {}).get(n, n)
+        _plt.text(x, y, label, ha="center", va="center", fontsize=10, zorder=4)
+    _plt.axis("off")
+    if title:
+        _plt.title(title)
+    _plt.tight_layout()
+    if save_path:
+        _plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        _plt.close()
+    else:
+        _plt.show()
+
+# ----- Instance methods (bound after definition) -----
+def _tbn_render_taxonomy_tree(self, save_path: Optional[str] = None, annotate_thresholds: bool = True, figsize=(11,7)):
+    root = getattr(self, "taxonomy_root", None)
+    if root is None:
+        raise ValueError("taxonomy_root is not set on this instance.")
+    # Collect edges and nodes
+    try:
+        edges = list(root.edges())
+        names = [n.name for n in root.walk()]
+    except Exception:
+        # Fallback: rebuild from node_lookup paths
+        names = list(self.node_lookup.keys())
+        edges = []
+        for name in names:
+            parts = name.split("/")
+            if len(parts) > 1:
+                parent = "/".join(parts[:-1])
+                edges.append((parent, name))
+    node_labels = {}
+    thresholds = getattr(self, "thresholds", None) if annotate_thresholds else None
+    for name in names:
+        if thresholds and name in thresholds:
+            node_labels[name] = f"{name}\nλ={thresholds[name]:.2f}"
+        else:
+            node_labels[name] = name
+    _draw_graph(edges=edges, node_labels=node_labels, figsize=figsize, title="Taxonomy Tree", save_path=save_path)
+
+def _tbn_render_detection_dag(self, edges=None, save_path: Optional[str] = None, figsize=(11,7), title: str = "Detection Dependency DAG"):
+    if edges is None:
+        # default to taxonomy edges
+        try:
+            edges = list(self.taxonomy_root.edges())
+        except Exception:
+            # rebuild from node_lookup path relations
+            edges = []
+            for name in self.node_lookup.keys():
+                parts = name.split("/")
+                if len(parts) > 1:
+                    parent = "/".join(parts[:-1])
+                    edges.append((parent, name))
+    node_colors = {}
+    names_in_model = set(getattr(self, "node_lookup", {}).keys() or [])
+    for (u, v) in edges:
+        if u in names_in_model:
+            node_colors[u] = "#EAF7E6"
+        if v in names_in_model:
+            node_colors[v] = "#EAF7E6"
+    _draw_graph(edges=edges, node_labels=None, node_colors=node_colors, figsize=figsize, title=title, save_path=save_path)
+
+# bind
+TaxonomyBayesianNetwork.render_taxonomy_tree = _tbn_render_taxonomy_tree
+TaxonomyBayesianNetwork.render_detection_dag = _tbn_render_detection_dag
