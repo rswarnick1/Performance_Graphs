@@ -172,6 +172,39 @@ class TaxonomyBayesianNetwork:
             for nm in lvl_names:
                 node = name_map[nm]
                 node.lam = self.best_response_against_maps(node, base_s, base_t)
+    def forward_backward_until_converged_dag(self, max_iter: int =1000, tol: float = 1e-6) -> None:
+        """Forward-then-backward Gauss–Seidel sweeps through the DAG until convergence.
+        Parents are NOT frozen; each update uses the latest neighbor values.
+        """
+        # initialize like the other routines for fairness
+        for n in self.nodes():
+            n.lam = random.uniform(0.2, 0.8)
+        levels_names = self._validate_and_toposort()
+        name_map = self.name_to_node()
+        last_obj = -1.0
+        for _ in range(max_iter):
+            improved = False
+            # forward sweep
+            for lvl_names in levels_names:
+                for nm in lvl_names:
+                    node = name_map[nm]
+                    new_lam = self.best_response(node)
+                    if abs(new_lam - node.lam) > tol:
+                        node.lam = new_lam
+                        improved = True
+            # backward sweep
+            for lvl_names in reversed(levels_names):
+                for nm in reversed(lvl_names):
+                    node = name_map[nm]
+                    new_lam = self.best_response(node)
+                    if abs(new_lam - node.lam) > tol:
+                        node.lam = new_lam
+                        improved = True
+            cur = self.total_objective()
+            if not improved or abs(cur - last_obj) <= tol:
+                break
+            last_obj = cur
+    
     def total_objective(self) -> float:
         # Compute a consistent snapshot-based total objective including child bonuses.
         base_s = {n.name: n.base_sensitivity(n.lam) for n in self.nodes()}
@@ -328,6 +361,18 @@ def equilibrium_rows(net: TaxonomyBayesianNetwork) -> List[Tuple[str, float, flo
         rows.append((n.name, n.lam, p, r))
     return rows
 
+def forward_backward_rows(net: TaxonomyBayesianNetwork) -> List[Tuple[str, float, float, float]]:
+    net.forward_backward_until_converged_dag()
+    base_s = {n.name: n.base_sensitivity(n.lam) for n in net.nodes()}
+    base_t = {n.name: n.base_specificity(n.lam) for n in net.nodes()}
+    rows = []
+    for n in net.nodes():
+        p = n.precision(n.lam, base_s, base_t)
+        r = n.recall(n.lam, base_s, base_t)
+        rows.append((n.name, n.lam, p, r))
+    return rows
+
+
 def format_rows(rows: List[Tuple[str,float,float,float]], title: str) -> str:
     name_w = max(len(r[0]) for r in rows) if rows else 4
     hdr = f"{title}\n{'Name'.ljust(name_w)}  {'λ':>6}  {'Precision':>10}  {'Recall':>8}  {'aP+bR':>8}"
@@ -343,6 +388,9 @@ def main():
     precision_diff = np.zeros((num_iters,11))
     recall_diff = np.zeros((num_iters,11))
     utility_diff = np.zeros((num_iters,11))
+    precision_diff_fb = np.zeros((num_iters,11))
+    recall_diff_fb = np.zeros((num_iters,11))
+    utility_diff_fb = np.zeros((num_iters,11))
     for i in range(num_iters):
         random.seed(i)
         np.random.seed(i)
@@ -350,7 +398,7 @@ def main():
         root = build_demo_taxonomy()
         dag = build_demo_dag()
         register_dag_on_nodes(root, dag)
-        net = TaxonomyBayesianNetwork(root, dag, a=0.4, b=0.6, gamma=((i+1)/5))
+        net = TaxonomyBayesianNetwork(root, dag, a=0.4, b=0.6, gamma=2*stats.beta.rvs(1,1,1))
 
         # Validate DAG (directed, acyclic) and get topo levels
         levels = net._validate_and_toposort()
@@ -390,6 +438,11 @@ def main():
         recall_diff[i, :] = np.array(eq_rows)[:,2].astype(float) - np.array(staged_rows)[:,2].astype(float)
 
         utility_diff[i, :] = np.array(eq_rows)[:,3].astype(float) - np.array(staged_rows)[:,3].astype(float)
+        # --- Forward-Backward non-frozen sweeps until convergence ---
+        fb_rows = forward_backward_rows(net)
+        precision_diff_fb[i, :] = np.array(eq_rows)[:,1].astype(float)-np.array(fb_rows)[:,1].astype(float) 
+        recall_diff_fb[i, :] = np.array(eq_rows)[:,2].astype(float) - np.array(fb_rows)[:,2].astype(float) 
+        utility_diff_fb[i, :] =  np.array(eq_rows)[:,3].astype(float) - np.array(fb_rows)[:,3].astype(float)
     # Figure
     fig_path = str(Path(__file__).with_name("taxonomy_dag.png"))
     draw_taxonomy_and_dag(root, dag, fig_path)
@@ -411,6 +464,21 @@ def main():
     axs[2].set_ylabel("Difference")
     plt.tight_layout()
     plt.savefig(Path(__file__).with_name("taxonomy_dag_differences.png"), dpi=160)
+    # Additional boxplots: Forward-Backward vs Equilibrium
+    fig2, axs2 = plt.subplots(1, 3, figsize=(15, 5))
+    axs2[0].boxplot(precision_diff_fb)
+    axs2[0].set_title("Precision Difference (Equilibrium - Fwd-Bwd)")
+    axs2[0].set_xlabel("Node Index"); axs2[0].set_ylabel("Difference")
+    axs2[1].boxplot(recall_diff_fb)
+    axs2[1].set_title("Recall Difference (Equilibrium - Fwd-Bwd)")
+    axs2[1].set_xlabel("Node Index"); axs2[1].set_ylabel("Difference")
+    axs2[2].boxplot(utility_diff_fb)
+    axs2[2].set_title("Utility Difference (Equilibrium - Fwd-Bwd)")
+    axs2[2].set_xlabel("Node Index"); axs2[2].set_ylabel("Difference")
+    plt.tight_layout()
+    plt.savefig(Path(__file__).with_name("taxonomy_dag_differences_forward_backward.png"), dpi=160)
+    print(f"Saved forward-backward differences boxplot to: {Path(__file__).with_name('taxonomy_dag_differences_forward_backward.png')}")
+    
     print(f"\nSaved differences boxplot to: {Path(__file__).with_name('taxonomy_dag_differences.png')}")
     print("\nDifferences summary:")
     print(f"Precision: {precision_diff.mean(axis=0)}")
