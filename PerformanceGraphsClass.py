@@ -339,10 +339,10 @@ def format_rows(rows: List[Tuple[str,float,float,float]], title: str) -> str:
     return "\n".join(out)
 
 def main():
-    num_iters = 10
-    precision_diff = np.array((num_iters,11))
-    recall_diff = np.array((num_iters,11))
-    utility_diff = np.array((num_iters,11))
+    num_iters = 30
+    precision_diff = np.zeros((num_iters,11))
+    recall_diff = np.zeros((num_iters,11))
+    utility_diff = np.zeros((num_iters,11))
     for i in range(num_iters):
         random.seed(i)
         np.random.seed(i)
@@ -350,7 +350,7 @@ def main():
         root = build_demo_taxonomy()
         dag = build_demo_dag()
         register_dag_on_nodes(root, dag)
-        net = TaxonomyBayesianNetwork(root, dag, a=0.4, b=0.6, gamma=((i+1)/5)*stats.beta.rvs(1,1,1))
+        net = TaxonomyBayesianNetwork(root, dag, a=0.4, b=0.6, gamma=((i+1)/5))
 
         # Validate DAG (directed, acyclic) and get topo levels
         levels = net._validate_and_toposort()
@@ -385,11 +385,57 @@ def main():
         print(format_rows(eq_rows, "NASH-STYLE EQUILIBRIUM (Reference)"))
         eq_obj = net.total_objective()
         print(f"\nTotal utility (equilibrium): {eq_obj:.4f}\nDelta vs staged: {eq_obj - staged_obj:+.4f}")
-    p
+
+        precision_diff[i, :] = np.array(eq_rows)[:,1].astype(float) - np.array(staged_rows)[:,1].astype(float)
+        recall_diff[i, :] = np.array(eq_rows)[:,2].astype(float) - np.array(staged_rows)[:,2].astype(float)
+
+        utility_diff[i, :] = np.array(eq_rows)[:,3].astype(float) - np.array(staged_rows)[:,3].astype(float)
     # Figure
     fig_path = str(Path(__file__).with_name("taxonomy_dag.png"))
     draw_taxonomy_and_dag(root, dag, fig_path)
     print(f"\nSaved taxonomy/DAG figure to: {fig_path}")
+
+    # plot a boxplot showing the distribution of the differences
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    axs[0].boxplot(precision_diff)
+    axs[0].set_title("Precision Difference (Equilibrium - Staged)")
+    axs[0].set_xlabel("Node Index")
+    axs[0].set_ylabel("Difference")
+    axs[1].boxplot(recall_diff)
+    axs[1].set_title("Recall Difference (Equilibrium - Staged)")
+    axs[1].set_xlabel("Node Index")
+    axs[1].set_ylabel("Difference")
+    axs[2].boxplot(utility_diff)
+    axs[2].set_title("Utility Difference (Equilibrium - Staged)")
+    axs[2].set_xlabel("Node Index")
+    axs[2].set_ylabel("Difference")
+    plt.tight_layout()
+    plt.savefig(Path(__file__).with_name("taxonomy_dag_differences.png"), dpi=160)
+    print(f"\nSaved differences boxplot to: {Path(__file__).with_name('taxonomy_dag_differences.png')}")
+    print("\nDifferences summary:")
+    print(f"Precision: {precision_diff.mean(axis=0)}")
+    print(f"Recall: {recall_diff.mean(axis=0)}")
+    print(f"Utility: {utility_diff.mean(axis=0)}")
+    print("\nDifferences stddev:")
+    print(f"Precision: {precision_diff.std(axis=0)}")
+    print(f"Recall: {recall_diff.std(axis=0)}")
+    print(f"Utility: {utility_diff.std(axis=0)}")
+    print("\nDifferences min/max:")
+    print(f"Precision: {precision_diff.min(axis=0)} / {precision_diff.max(axis=0)}")
+    print(f"Recall: {recall_diff.min(axis=0)} / {recall_diff.max(axis=0)}")
+    print(f"Utility: {utility_diff.min(axis=0)} / {utility_diff.max(axis=0)}")
+    print("\nDifferences median:")
+    print(f"Precision: {np.median(precision_diff, axis=0)}")
+    print(f"Recall: {np.median(recall_diff, axis=0)}")
+    print(f"Utility: {np.median(utility_diff, axis=0)}")
+    print("\nDifferences 25th/75th percentiles:")
+    print(f"Precision: {np.percentile(precision_diff, 25, axis=0)} / {np.percentile(precision_diff, 75, axis=0)}")
+    print(f"Recall: {np.percentile(recall_diff, 25, axis=0)} / {np.percentile(recall_diff, 75, axis=0)}")
+    print(f"Utility: {np.percentile(utility_diff, 25, axis=0)} / {np.percentile(utility_diff, 75, axis=0)}")
+    print("\nDifferences 5th/95th percentiles:")
+    print(f"Precision: {np.percentile(precision_diff, 5, axis=0)} / {np.percentile(precision_diff, 95, axis=0)}")
+    print(f"Recall: {np.percentile(recall_diff, 5, axis=0)} / {np.percentile(recall_diff, 95, axis=0)}")
+    print(f"Utility: {np.percentile(utility_diff, 5, axis=0)} / {np.percentile(utility_diff, 95, axis=0)}")
 
 if __name__ == "__main__":
     main()
