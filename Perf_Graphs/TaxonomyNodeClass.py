@@ -9,6 +9,20 @@ def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 @dataclass
 class TaxonomyNode:
+    """
+    A node in a taxonomy DAG, representing a class or concept with performance metrics. 
+    Each node can have a parent and multiple children, and it can influence its neighbors
+    through a directed acyclic graph (DAG) structure. The node's performance is defined by
+    its sensitivity, specificity, and prevalence, which can be adjusted based on the
+    influence of its parent nodes.
+
+    Attributes:
+        name (str): The name of the taxonomy node.
+        parent (Optional[TaxonomyNode]): The parent node in the taxonomy.
+        children (List[TaxonomyNode]): The child nodes in the taxonomy.
+        pos_weight (float): Weight for positive influence from parents.
+        neg_weight (float): Weight for negative influence from parents.
+    """
     name: str
     parent: Optional["TaxonomyNode"] = None
     children: List["TaxonomyNode"] = field(default_factory=list)
@@ -83,6 +97,7 @@ class TaxonomyNode:
         if denom <= 0.0:
             return 0.0
         return (t*pi) / denom
+
 
     # Convenience wrappers used by the network
     def precision(self, lam: float, neighbor_s: Dict[str, float], neighbor_t: Dict[str, float]) -> float:
