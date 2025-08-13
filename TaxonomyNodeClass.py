@@ -78,11 +78,7 @@ class TaxonomyNode:
 
     def recall_from_st(self, s: float, t: float) -> float:
         # Recall is sensitivity
-        pi = clamp(self.prevalence)
-        denom = t*pi + (1.0 - s)*(1.0 - pi)
-        if denom <= 0.0:
-            return 0.0
-        return (t*pi) / denom
+        s
 
     # Convenience wrappers used by the network
     def precision(self, lam: float, neighbor_s: Dict[str, float], neighbor_t: Dict[str, float]) -> float:
