@@ -78,7 +78,7 @@ class TaxonomyNode:
 
     def recall_from_st(self, s: float, t: float) -> float:
         # Recall is sensitivity
-        s
+        return s
 
     # Convenience wrappers used by the network
     def precision(self, lam: float, neighbor_s: Dict[str, float], neighbor_t: Dict[str, float]) -> float:
